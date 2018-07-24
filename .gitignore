@@ -1,3 +1,14 @@
+obj/*
+*.ttf
+*.csv
+*.png
+*.svg
+*.ftb
+*.lst
+*.rc
+arch/*
+example/*
+
 # Prerequisites
 *.d
 
