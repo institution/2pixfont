@@ -1,3 +1,5 @@
+pixfont
+exttest
 obj/*
 *.ttf
 *.csv
