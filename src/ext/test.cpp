@@ -3,6 +3,7 @@
 
 #include "ext.hpp"
 
+/*
 TEST_CASE( "darrayN", "" ) {
 	
 	SECTION("memory-layout") {
@@ -36,14 +37,5 @@ TEST_CASE( "darrayN", "" ) {
 		REQUIRE(arr({2,1,1}) == 11);
 	}
 	
-	/*SECTION("int16") {
-		std::stringstream s;
-
-		int16_t x = 0x4063;
-		write(s, x);
-		int16_t y;
-		read(s, y);
-		
-		REQUIRE(x == y);		
-	}*/
 }
+*/

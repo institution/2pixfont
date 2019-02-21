@@ -61,8 +61,19 @@ pixfont_cpps = [
 	'./src/ext/fail.cpp'
 ]
 
+
+pixtest_cpps = [
+	'./src/pixfont/test_ref.cpp',	
+]
+
 exttest_objs = env.Object(exttest_cpps, CCFLAGS=CCFLAGS)
 pixfont_objs = env.Object(pixfont_cpps, CCFLAGS=CCFLAGS)
+pixtest_objs = env.Object(pixtest_cpps, CCFLAGS=CCFLAGS)
+
+env.Program('pixtest', pixtest_objs,
+	CCFLAGS=CCFLAGS,
+	LINKFLAGS=LINKFLAGS
+)
 
 env.Program('pixfont', pixfont_objs,
 	CCFLAGS=CCFLAGS,

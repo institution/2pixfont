@@ -4,19 +4,17 @@
 #include <algorithm>
 #include <cstdint>
 #include <string>
+#include <cmath>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
 #include "../lodepng/lodepng.h"
 #include "../ext/ext.hpp"
+#include "ref.hpp"
 
+using namespace ext;
 
-using v2s = ext::v2<int16_t>;
-
-using std::uint8_t;
-using std::uint16_t;
-using std::uint32_t;
 using std::string;
 
 template <class ... Args>
@@ -25,94 +23,109 @@ void fail(Args const& ... args) {
 }
 
 
-using v2f = aga2::Mv1<float>;
-using v2i = aga2::Mv1<int>;
-
-
 #define LODEPNG_CALL(FUNCTION_NAME, ...) if (auto error = FUNCTION_NAME(__VA_ARGS__)) fail(#FUNCTION_NAME ": %||", lodepng_error_text(error))
 
 #define FT_CALL(FT_FUNCTION_NAME, ...) if (auto error = FT_FUNCTION_NAME(__VA_ARGS__)) fail(#FT_FUNCTION_NAME ": %||", error)
 
 
-struct Buffer2D
-{
-	v2i dim;
-	std::vector<uint8_t> buf;
 
-	Buffer2D(v2i const& dim): dim(dim) {
-		buf.resize(dim[0] * dim[1] * 4);
-	}
+Vec<i32,2> get_bitmap_dim(FT_Bitmap const& bm) {
+	return {i32(bm.rows), i32(bm.width)};
+}
 
+
+template <class T, u8 N>
+struct Box {
+	Vec<T,N> pos;
+	Vec<T,N> dim;
+	//Vec<T,N> end() const { return pos + dim; }
 };
 
-
-void copy_mono(Buffer2D & trg, v2i const& pos, FT_Bitmap const& bm)
+void copy_bitmap_to(Ref<u8,i32,2> dst, Vec<i32,2> pos, FT_Bitmap const& bm)
 {
+	// FT_PIXEL_MODE_GRAY
 	if (int(bm.pixel_mode) != FT_PIXEL_MODE_MONO) fail("required FT_PIXEL_MODE_MONO");
 	if (int(bm.palette_mode) != 0) fail("required palette_mode 0");
 
-	uint8_t * line_p = bm.buffer;
-	uint8_t * byte_p = nullptr;
+	u8 * line_p = bm.buffer;
+	u8 * byte_p = nullptr;
 
 	for (size_t j = 0; j < bm.rows; ++j) {
-
 		byte_p = line_p;
-
 		size_t i = 0;
 		while (i < bm.width) {
-
-			uint8_t byte = *byte_p;
-
+			u8 byte = *byte_p;
 			for (size_t k = 0; k < 8 and i < bm.width; ++k)
 			{
-				bool mono = byte & 0B10000000;
-
-				auto tp = 4 * ((pos[0] + i) + (pos[1] + j) * trg.dim[0]);
-				trg.buf.at(tp+0) = 0;
-				trg.buf.at(tp+1) = 0;
-				trg.buf.at(tp+2) = 0;
-				trg.buf.at(tp+3) = mono * 255;
-
+				bool mono = byte & u8(0B10000000);
+				dst[pos[1] + j][pos[0] + i] = mono;
 				++i;
 				byte = byte << 1;
 			}
-
 			byte_p += 1;
 		}
-
 		line_p += bm.pitch;
 	}
-
 }
 
 
-void copy_gray(Buffer2D & trg, v2i const& pos, FT_Bitmap const& bm)
-{
-	if (int(bm.pixel_mode) != FT_PIXEL_MODE_GRAY) fail("required FT_PIXEL_MODE_GRAY");
-	if (int(bm.palette_mode) != 0) fail("required palette_mode 0");
+f32 get_dist(Vec<f32,2> a, Vec<f32,2> b) {
+	return std::sqrt((a - b).pow(2).sum());
+}
+	
 
-
-	uint8_t * bp = bm.buffer;
-	for (size_t j=0; j<bm.rows; ++j) {
-		for (size_t i=0; i<bm.width; ++i) {
-
-			uint8_t gray = *(bp + i);
-
-			auto tp = 4 * ((pos[0] + i) + (pos[1] + j) * trg.dim[0]);
-
-			trg.buf.at(tp+0) = 0;
-			trg.buf.at(tp+1) = 0;
-			trg.buf.at(tp+2) = 0;
-			trg.buf.at(tp+3) = gray;
-
+u8 get_distance_to(Vec<i32,2> pos, Ref<u8,i32,2> img, u8 value) 
+{	
+	// find distance
+	f32 best_dist = std::numeric_limits<f32>::infinity();
+	for (i32 j = 0; j < img.len(); ++j) {	
+		auto img_j = img[j];
+		for (i32 i = 0; i < img_j.len(); ++i) {
+			if (img_j[i] == value) {
+				auto dist = get_dist(Vec<f32,2>(pos), {f32(i),f32(j)});
+				if (dist < best_dist) {
+					best_dist = dist;					
+				}
+			}
 		}
-		bp += bm.pitch;
 	}
 
+	// map to signed discrete distance
+	// value 1: inside,  0: outside
+	// sign  +: outside, -: inside
+	f32 const prec = 16;
+	i8 d = value ? +1 : -1;
+	d *= i8(((best_dist*prec) <= 127) ? (best_dist*prec) : f32(127));
+	return u8(d);
+}
+
+
+void to_distance_field(Ref<u8,i32,2> dst, Ref<u8,i32,2> src) 
+{
+	for (i32 j = 0; j < src.dim[1]; ++j) {	
+		for (i32 i = 0; i < src.dim[0]; ++i) {			
+			auto s = src[j][i];			
+			auto d = get_distance_to({i,j}, src, not s);
+			dst[j][i] = d;	
+		}
+	}	
+}
+
+void copy_to(Ref<u8,i32,2> dst, Vec<i32,2> pos, Ref<u8,i32,2> src)
+{
+	for (i32 j = 0; j < src.len(); ++j) {	
+		auto src_j = src[j];
+		auto dst_pj = dst[pos[1] + j];
+		for (i32 i = 0; i < src_j.len(); ++i) {
+			dst_pj[pos[0] + i] = src_j[i];		
+		}
+	}
 }
 
 
 
+
+/*
 void copy_bitmap(ext::darray2<uint8_t, int16_t> & img, v2s pos, FT_Bitmap const& bm)
 {
 	if (int(bm.pixel_mode) != 2) fail("required pixel_mode 2");
@@ -130,6 +143,9 @@ void copy_bitmap(ext::darray2<uint8_t, int16_t> & img, v2s pos, FT_Bitmap const&
 	}
 
 }
+*/
+
+
 
 struct Color4{
 	uint8_t r,g,b,a;
@@ -137,34 +153,38 @@ struct Color4{
 };
 
 
-void fill(Buffer2D & trg, v2i const& pos, v2i const dim, Color4 const color) {
 
 
-	for (int j=0; j<dim[1]; ++j) {
-		for (int i=0; i<dim[0]; ++i) {
 
-			auto tp = 4 * ((pos[0] + i) + (pos[1] + j) * trg.dim[0]);
+void lode_save_grayscale(Ref<u8,i32,2> src, char const* fname)
+{
+	auto s = src.lin();
 
-			trg.buf.at(tp+0) = color.r;
-			trg.buf.at(tp+1) = color.g;
-			trg.buf.at(tp+2) = color.b;
-			trg.buf.at(tp+3) = color.a;
-			//trg.buf.at(tp+3) = gray;
+	Own<u8,size_t,1> png; png.alloc({s.size() * 4}, u8(0));
 
-		}
+	for (size_t i = 0; i < s.size(); ++i)
+	{
+		size_t t = 4*i;
+		png[t+0] = s[i];
+		png[t+1] = s[i];
+		png[t+2] = s[i];
+		png[t+3] = 255;		
+	}	
 
-	}
-
+	LODEPNG_CALL(lodepng_encode32_file,
+		fname,
+		png.ptr,
+		src.dim[0],
+		src.dim[1]
+	);
 }
-
-
-
-
-
 
 int main(int argc, char * argv[])
 {
-	int verbose = 1;
+	int const verbose = 1;
+	int const pixsize = 128;
+	int const extra_margin = 16;
+
 
 	assert(argc == 2);
 	// argv[1] -- font path
@@ -172,7 +192,6 @@ int main(int argc, char * argv[])
 	auto fe = filesys::filename(argv[1]);
 	auto fn = fe.substr(0, fe.size()-4);
 
-	int pixsize = 128;
 	std::cout << "INFO: pixsize " << pixsize << "\n";
 
 	FT_Library library;
@@ -247,7 +266,8 @@ int main(int argc, char * argv[])
 		16      // pix height
 	);*/
 
-    auto chars = std::string(
+	
+    /*auto chars = std::string(
 		" !\"#$%&'()*+,-./"
 		"0123456789"
 		":;<=>?@"
@@ -255,93 +275,72 @@ int main(int argc, char * argv[])
 		"[\\]^_`"
 		"abcdefghijklmnopqrstuvwxyz"
 		"{|}~"
+	);*/
+
+    auto chars = std::string(
+		"HIJKLMNO"
 	);
 
+
+	// csv file
 	std::ofstream fdesc(format("%||.csv", fontname));
 	print(fdesc, "code,bearing_x,bearing_y,advance,width,height,pos_x,pos_y\n");
 
-	auto xx = (chars.size()/8) * pixsize;
-	auto yy = pixsize * 10;
-
+	// out image
+	i32 xx = (chars.size()/8 + 1) * (pixsize + 64);
+	i32 yy = (pixsize + 64) * 10;
 	print("img.dim %|| %||\n", xx, yy);
+    Own<u8,i32,2> out; out.alloc({xx,yy}, 0);
 
-    Buffer2D image(v2i(xx,yy));
-	fill(image, v2i(0,0), image.dim, Color4(100,100,100,255));
-
-    v2i sep(4,4);
-    v2i pos = sep;
-
-
-	//ext::darray2<uint8_t, int16_t> img;
-	//img.resize(v2s(xx,yy), 0);
-
-
-
-
-
+	// loop 
+    Vec<i32,2> sep{4,4};
+	Vec<i32,2> pos = sep; // cursor position
 	for (auto charcode: chars)
     {
+		// render glyph
 		print("rendering %||\n", charcode);
-
 		auto glyph_index = FT_Get_Char_Index(face, charcode);
 		FT_CALL(FT_Load_Glyph, face, glyph_index, FT_LOAD_DEFAULT);
-		//FT_CALL(FT_Render_Glyph, face->glyph, FT_RENDER_MODE_NORMAL);
 		FT_CALL(FT_Render_Glyph, face->glyph, FT_RENDER_MODE_MONO);
 
-
-
+		// glyph
 		auto gly = face->glyph;
 		auto * met = &gly->metrics;
 		auto & bm = gly->bitmap;
-
-		//unsigned char*  buffer;
-		//void*           palette;
-/*
-		print("%||\n", charcode);
-		print(" width %||\n", met->width);
-		print(" height %||\n", met->height);
-		print(" bearing_x %||\n", met->horiBearingX);
-		print(" bearing_y %||\n", met->horiBearingY);
-		print(" advance %||\n", met->horiAdvance);
-
-		print(" bitmap_left %||\n", gly->bitmap_left);
-		print(" bitmap_top %||\n", gly->bitmap_top);
-		print(" advance[0] %||\n", gly->advance.x >> 6);
-		print(" advance[1] %||\n", gly->advance.y >> 6);
-
-		print(" bitmap\n");
-		print("  rows %||\n", bm.rows);
-		print("  width %||\n", bm.width);
-		print("  pitch %||\n", bm.pitch);
-		print("  num_grays %||\n", bm.num_grays);
-		print("  pixel_mode %||\n", int(bm.pixel_mode));
-		print("  palette_mode %||\n", int(bm.palette_mode));
-*/
-		/* now, draw to our target surface */
-		/*my_draw_bitmap( &slot->bitmap,
-                  pen_x + slot->bitmap_left,
-                  pen_y - slot->bitmap_top );
-		*/
-
 		auto adv = gly->advance.x >> 6;
-		auto dim = v2i(bm.width, bm.rows);
+		
+		
 
-		if (pos[0] + adv + sep[0] >= image.dim[0])
-		{
+		// create distance field
+		i32 const mar = 16;
+		auto dim = Vec<i32,2>{
+			i32(adv + mar + mar),
+			i32(f_height + mar + mar)
+		};
+
+		auto bm_pos = Vec<i32,2>{
+			i32(gly->bitmap_left + mar),
+			i32(f_asc - gly->bitmap_top + mar)
+		};
+
+		Own<u8,i32,2> img; img.alloc(dim, 0);
+		copy_bitmap_to(img, bm_pos, bm);
+		
+		Own<u8,i32,2> sdf; sdf.alloc(dim, 0);
+		to_distance_field(sdf, img);
+
+		// paste to output
+		if (pos[0] + sep[0] + sdf.dim[0] >= out.dim[0]) {
 			pos[0] = sep[0];
-			pos[1] += f_height + 8 + sep[1];
+			pos[1] += sep[1] + sdf.dim[1];
 		}
 
-		fill(image, pos, v2i(adv,f_height), Color4(0,0,0,0));
+		auto gly_pos = pos + Vec<i32,2>{i32(gly->bitmap_left - mar), i32(f_asc - gly->bitmap_top - mar)};
+		
+		copy_to(out, pos, sdf);
+		pos[0] += sdf.dim[0] + sep[0];
 
-
-		auto gly_pos = pos + v2i(gly->bitmap_left, f_asc - gly->bitmap_top);
-
-		copy_mono(image, gly_pos, bm);
-		//copy_bitmap(img, v2s(gly_pos[0], gly_pos[1]), bm);
-
-		pos[0] += adv + sep[0];
-
+		// csv file
 		print(fdesc, "%||,%||,%||,%||,%||,%||,%||,%||\n",
 			int(charcode),
 			gly->bitmap_left,
@@ -352,7 +351,9 @@ int main(int argc, char * argv[])
 			gly_pos[0],
 			gly_pos[1]
 		);
+		
 
+		// rc file
 		print(rc_file, "sprite %||\n", int(charcode));
 
 		if (charcode == '\\' or charcode == '\"') {
@@ -366,21 +367,38 @@ int main(int argc, char * argv[])
 		print(rc_file, "delta %|| %||\n", gly->bitmap_left, -gly->bitmap_top + f_asc);
 		print(rc_file, "adv %||\n", (gly->advance.x >> 6));
 		print(rc_file, "\n");
+
+		// show debug info
+		if (verbose >= 2) {
+			print("%||\n", charcode);
+			print(" width %||\n", met->width);
+			print(" height %||\n", met->height);
+			print(" bearing_x %||\n", met->horiBearingX);
+			print(" bearing_y %||\n", met->horiBearingY);
+			print(" advance %||\n", met->horiAdvance);
+
+			print(" bitmap_left %||\n", gly->bitmap_left);
+			print(" bitmap_top %||\n", gly->bitmap_top);
+			print(" advance[0] %||\n", gly->advance.x >> 6);
+			print(" advance[1] %||\n", gly->advance.y >> 6);
+
+			print(" bitmap\n");
+			print("  rows %||\n", bm.rows);
+			print("  width %||\n", bm.width);
+			print("  pitch %||\n", bm.pitch);
+			print("  num_grays %||\n", bm.num_grays);
+			print("  pixel_mode %||\n", int(bm.pixel_mode));
+			print("  palette_mode %||\n", int(bm.palette_mode));
+		}
 	}
 
 	rc_file.close();
-
-	LODEPNG_CALL(lodepng::encode,
-		png_name,
-		image.buf,
-		image.dim[0],
-		image.dim[1]
-	);
+	
+	print("writing output image... %||\n", png_name);
+	lode_save_grayscale(out.ref(), png_name.c_str());
 
 	return 0;
 }
-
-
 
 
 
